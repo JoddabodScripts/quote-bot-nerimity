@@ -2,6 +2,8 @@
 
 A bot that generates beautiful quote images from messages on Nerimity.
 
+![Example quote image](photos/quote.png)
+
 ## Features
 
 - 📸 Generates quote images with user avatar
