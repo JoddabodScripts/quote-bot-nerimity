@@ -38,6 +38,46 @@ async function getUsername(userId) {
   }
 }
 
+function getMentionUsername(user) {
+  return user?.username || user?.user?.username || user?.createdBy?.username || null;
+}
+
+function getMentionId(user) {
+  return user?.id || user?.user?.id || user?.createdBy?.id || null;
+}
+
+async function resolveUserMentions(content, mentions = []) {
+  const mentionMap = new Map();
+
+  for (const user of mentions) {
+    const id = getMentionId(user);
+    const username = getMentionUsername(user);
+    if (id && username) mentionMap.set(String(id), username);
+  }
+
+  const mentionIds = [...new Set([...content.matchAll(/\[@:([^\]]+)\]/g)].map((match) => match[1]))];
+  for (const userId of mentionIds) {
+    if (!mentionMap.has(userId)) {
+      const cachedUser = client.users?.cache?.get(userId);
+      if (cachedUser?.username) mentionMap.set(userId, cachedUser.username);
+    }
+
+    if (!mentionMap.has(userId) && userId === client.user?.id) {
+      mentionMap.set(userId, client.user.username);
+    }
+
+    if (!mentionMap.has(userId)) {
+      const username = await getUsername(userId);
+      if (username) mentionMap.set(userId, username);
+    }
+  }
+
+  return content.replace(/\[@:([^\]]+)\]/g, (match, userId) => {
+    const username = mentionMap.get(userId);
+    return username ? `@${username}` : match;
+  });
+}
+
 let botId = null;
 let isProcessing = false;
 
@@ -67,6 +107,8 @@ client.on(Events.MessageCreate, async (msg) => {
     let targetUsername = null;
     let targetAvatar = null;
     let targetUserId = null;
+    let targetUserTag = null;
+    let targetMentions = [];
 
     // Check for built-in quote format [q:messageId]
     if (quoteMatch) {
@@ -75,12 +117,14 @@ client.on(Events.MessageCreate, async (msg) => {
         const msgRes = await fetch(`https://nerimity.com/api/channels/${message.channel?.id}/messages/${quotedMsgId}`, {
           headers: { Authorization: process.env.TOKEN }
         });
-        const msgData = await res.json();
+        const msgData = await msgRes.json();
         if (msgData.content) {
           targetContent = msgData.content;
           targetUsername = msgData.createdBy?.username || "User";
           targetAvatar = msgData.createdBy?.avatar;
           targetUserId = msgData.createdBy?.id;
+          targetUserTag = msgData.createdBy?.tag;
+          targetMentions = msgData.mentions || [];
         }
       } catch (e) {
         console.log("Failed to fetch quoted message:", e.message);
@@ -95,6 +139,8 @@ client.on(Events.MessageCreate, async (msg) => {
         targetUsername = replyData.replyToMessage.createdBy?.username || "User";
         targetAvatar = replyData.replyToMessage.createdBy?.avatar;
         targetUserId = replyData.replyToMessage.createdBy?.id;
+        targetUserTag = replyData.replyToMessage.createdBy?.tag;
+        targetMentions = replyData.replyToMessage.mentions || [];
       }
     }
 
@@ -108,6 +154,8 @@ client.on(Events.MessageCreate, async (msg) => {
           targetUsername = m.user?.username || "User";
           targetAvatar = m.raw?.createdBy?.avatar;
           targetUserId = m.user?.id;
+          targetUserTag = m.user?.tag || m.raw?.createdBy?.tag;
+          targetMentions = m.mentions || m.raw?.mentions || [];
           break;
         }
       }
@@ -118,17 +166,8 @@ client.on(Events.MessageCreate, async (msg) => {
       return;
     }
 
-    // Replace ping references [@:userid] with actual usernames
-    const pingMatches = targetContent.match(/\[@:(\d+)\]/g);
-    if (pingMatches) {
-      for (const match of pingMatches) {
-        const userId = match.match(/\[@:(\d+)\]/)[1];
-        const username = await getUsername(userId);
-        if (username) {
-          targetContent = targetContent.replace(match, `@${username}`);
-        }
-      }
-    }
+    // Replace Nerimity mentions [@:userId] with the mentioned user's name.
+    targetContent = await resolveUserMentions(targetContent, targetMentions);
 
     let avatarUrl = null;
     if (targetAvatar) {
@@ -139,7 +178,8 @@ client.on(Events.MessageCreate, async (msg) => {
       targetContent.slice(0, 500),
       targetUsername,
       client.user?.username || "Quote Bot",
-      avatarUrl
+      avatarUrl,
+      targetUserTag
     );
 
     const url = await uploadToCatbox(imageBuffer);

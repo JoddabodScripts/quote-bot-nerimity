@@ -1,86 +1,89 @@
 import { createCanvas, loadImage } from 'canvas';
+import fetch from 'node-fetch';
 import sharp from 'sharp';
 
-const WIDTH = 700;
-const HEIGHT = 450;
+const WIDTH = 1200;
+const HEIGHT = 675;
 
-async function convertWebpToPng(buffer) {
-  return await sharp(buffer).png().toBuffer();
+function drawCoverImage(ctx, image, x, y, width, height, scaleMultiplier = 1) {
+  const scale = Math.max(width / image.width, height / image.height) * scaleMultiplier;
+  const drawW = image.width * scale;
+  const drawH = image.height * scale;
+  const drawX = x + (width - drawW) / 2;
+  const drawY = y + (height - drawH) / 2;
+  ctx.drawImage(image, drawX, drawY, drawW, drawH);
 }
 
-function wrapText(text, maxWidth, fontSize) {
-  const words = text.split(' ');
+function wrapText(ctx, text, maxWidth) {
+  const paragraphs = String(text || '').trim().split(/\n+/);
   const lines = [];
-  let currentLine = '';
-  const charsPerLine = Math.floor(maxWidth / (fontSize * 0.55));
 
-  for (const word of words) {
-    if (currentLine.length + word.length + 1 > charsPerLine && currentLine) {
-      lines.push(currentLine);
-      currentLine = word;
-    } else {
-      currentLine = currentLine ? `${currentLine} ${word}` : word;
+  for (const paragraph of paragraphs) {
+    const words = paragraph.replace(/\s+/g, ' ').split(' ').filter(Boolean);
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+
+    if (currentLine) lines.push(currentLine);
+  }
+
+  return lines.length ? lines : [''];
+}
+
+function fitQuoteLines(ctx, quoteText, maxWidth, maxLines) {
+  for (let fontSize = 60; fontSize >= 38; fontSize -= 4) {
+    ctx.font = `bold ${fontSize}px Arial, Helvetica, sans-serif`;
+    const wrappedLines = wrapText(ctx, quoteText, maxWidth);
+    const fits = wrappedLines.length <= maxLines;
+
+    if (fits || fontSize === 38) {
+      const lines = wrappedLines.slice(0, maxLines);
+      if (!fits) {
+        let lastLine = lines[maxLines - 1];
+        while (lastLine.length > 1 && ctx.measureText(`${lastLine}…`).width > maxWidth) {
+          lastLine = lastLine.slice(0, -1).trimEnd();
+        }
+        lines[maxLines - 1] = `${lastLine}…`;
+      }
+
+      return { fontSize, lines };
     }
   }
-  if (currentLine) lines.push(currentLine);
-  return lines.slice(0, 5);
 }
 
-async function generateQuoteImage(quoteText, username, botName, avatarUrl = null) {
+async function generateQuoteImage(quoteText, username, botName, avatarUrl = null, userTag = null) {
   const canvas = createCanvas(WIDTH, HEIGHT);
   const ctx = canvas.getContext('2d');
 
-  // FULL CANVAS - white background first
-  const imageData = ctx.createImageData(WIDTH, HEIGHT);
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    imageData.data[i] = 255; imageData.data[i+1] = 255; imageData.data[i+2] = 255; imageData.data[i+3] = 255;
-  }
-  ctx.putImageData(imageData, 0, 0);
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  // Avatar on left - fills full height with slight overflow for edge overlap
-  const avatarWidth = 450;
+  const avatarWidth = 570;
   let avatarLoaded = false;
+
   if (avatarUrl) {
     try {
-      let imageBuffer;
       const res = await fetch(avatarUrl);
-      const arrayBuffer = await res.arrayBuffer();
-      imageBuffer = Buffer.from(arrayBuffer);
-      if (avatarUrl.includes('.webp')) {
-        imageBuffer = await convertWebpToPng(imageBuffer);
-      }
-      const avatarImg = await loadImage(imageBuffer);
+      const imageBuffer = Buffer.from(await res.arrayBuffer());
+      const pngBuffer = await sharp(imageBuffer)
+        .grayscale()
+        .modulate({ brightness: 0.95 })
+        .png()
+        .toBuffer();
+      const avatarImg = await loadImage(pngBuffer);
 
-      // Scale to fill full height exactly, then add 15% overflow for edge effect
-      const scaleX = avatarWidth / avatarImg.width;
-      const scaleY = HEIGHT / avatarImg.height; // Full height
-      const baseScale = scaleX < scaleY ? scaleX : scaleY; // Fit within width
-      const overflowScale = baseScale * 1.15; // 15% overflow
-      const drawW = avatarImg.width * overflowScale;
-      const drawH = avatarImg.height * overflowScale;
+      drawCoverImage(ctx, avatarImg, 0, 0, avatarWidth, HEIGHT, 1.08);
 
-      // Position centered horizontally, centered vertically
-      const avatarX = (avatarWidth - drawW) / 2;
-      const avatarY = (HEIGHT - drawH) / 2; // Center vertically
-      ctx.drawImage(avatarImg, avatarX, avatarY, drawW, drawH);
-
-      // Greyscale filter with soft radial gradient (darker edges, lighter center)
-      ctx.save();
-      ctx.globalCompositeOperation = 'multiply';
-      const gradient = ctx.createRadialGradient(
-        avatarX + drawW / 2,
-        avatarY + drawH / 2,
-        drawW / 2 * 0.35,
-        avatarX + drawW / 2,
-        avatarY + drawH / 2,
-        drawW / 2
-      );
-      gradient.addColorStop(0, '#ffffff');
-      gradient.addColorStop(0.6, '#808080');
-      gradient.addColorStop(1, '#000000');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(avatarX, avatarY, drawW, drawH);
-      ctx.restore();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+      ctx.fillRect(0, 0, avatarWidth, HEIGHT);
       avatarLoaded = true;
     } catch (e) {
       console.log("Avatar load failed:", e.message);
@@ -88,55 +91,68 @@ async function generateQuoteImage(quoteText, username, botName, avatarUrl = null
   }
 
   if (!avatarLoaded) {
-    const avatarBg = ctx.createImageData(avatarWidth, HEIGHT);
-    for (let i = 0; i < avatarBg.data.length; i += 4) {
-      avatarBg.data[i] = 99; avatarBg.data[i+1] = 102; avatarBg.data[i+2] = 229; avatarBg.data[i+3] = 255;
-    }
-    ctx.putImageData(avatarBg, 0, 0);
+    const fallback = ctx.createLinearGradient(0, 0, avatarWidth, HEIGHT);
+    fallback.addColorStop(0, '#4b4b4b');
+    fallback.addColorStop(1, '#171717');
+    ctx.fillStyle = fallback;
+    ctx.fillRect(0, 0, avatarWidth, HEIGHT);
   }
 
-  // RIGHT SIDE - black starting at x=300 (original position)
-  const rightStart = 300;  // Original position - no gap between avatar and black
-  const rightWidth = WIDTH - rightStart;
+  const sideShade = ctx.createLinearGradient(0, 0, avatarWidth, 0);
+  sideShade.addColorStop(0, 'rgba(0, 0, 0, 0.08)');
+  sideShade.addColorStop(0.65, 'rgba(0, 0, 0, 0.22)');
+  sideShade.addColorStop(1, 'rgba(0, 0, 0, 0.75)');
+  ctx.fillStyle = sideShade;
+  ctx.fillRect(0, 0, avatarWidth, HEIGHT);
 
-  ctx.fillStyle = 'black';
-  ctx.fillRect(rightStart, 0, rightWidth, HEIGHT);
+  const fade = ctx.createLinearGradient(260, 0, 650, 0);
+  fade.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  fade.addColorStop(0.5, 'rgba(0, 0, 0, 0.72)');
+  fade.addColorStop(1, 'rgba(0, 0, 0, 1)');
+  ctx.fillStyle = fade;
+  ctx.fillRect(260, 0, 390, HEIGHT);
 
-  // TEXT LAYOUT - quote with username below
-  const quoteFontSize = 48;
-  const tagLineFont = 'italic 20px Arial, sans-serif';
-  const botTagFont = '16px Arial, sans-serif';
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(650, 0, WIDTH - 650, HEIGHT);
 
-  // Quote text centered in the middle of right side
-  const quote = `"${quoteText}"`;
-  const textLines = wrapText(quote, rightWidth - 80, quoteFontSize);
+  const textStart = 540;
+  const textWidth = WIDTH - textStart - 78;
+  const centerX = textStart + textWidth / 2;
+  const maxQuoteLines = 4;
+  const { fontSize, lines } = fitQuoteLines(ctx, quoteText, textWidth, maxQuoteLines);
+  const lineHeight = fontSize * 1.24;
+  const quoteHeight = lines.length * lineHeight;
+  const metaGap = 28;
+  const displayNameSize = 28;
+  const handleSize = 20;
+  const groupHeight = quoteHeight + metaGap + displayNameSize + 8 + handleSize;
+  let y = (HEIGHT - groupHeight) / 2 + lineHeight * 0.85;
 
-  ctx.font = `bold ${quoteFontSize}px Arial, sans-serif`;
+  ctx.font = `bold ${fontSize}px Arial, Helvetica, sans-serif`;
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
 
-  // Center vertically in available space
-  const centerX = rightStart + rightWidth / 2;
-  const centerY = HEIGHT / 2 - ((textLines.length * 65) / 2) + 80;
-
-  let currentY = centerY - ((textLines.length * 65) / 2);
-  for (const line of textLines) {
-    ctx.fillText(line, centerX, currentY);
-    currentY += 65;
+  for (const line of lines) {
+    ctx.fillText(line, centerX, y);
+    y += lineHeight;
   }
 
-  // Username tag below the quote
-  const tagLine = `— ${username}`;
-  ctx.font = tagLineFont;
-  ctx.fillStyle = '#aaaaaa';
-  ctx.textAlign = 'center';
-  ctx.fillText(tagLine, centerX, currentY + 60);
+  y += metaGap;
+  ctx.font = `italic ${displayNameSize}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`- ${username}`, centerX, y);
 
-  // Bot's display name at bottom right corner
-  ctx.font = botTagFont;
-  ctx.fillStyle = '#777777';
+  y += displayNameSize + 8;
+  ctx.font = `${handleSize}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = '#9a9a9a';
+  const handle = userTag ? `@${username}:${userTag}` : `@${username}`;
+  ctx.fillText(handle, centerX, y);
+
+  ctx.font = '22px Arial, Helvetica, sans-serif';
+  ctx.fillStyle = '#9a9a9a';
   ctx.textAlign = 'right';
-  ctx.fillText(botName, WIDTH - 20, HEIGHT - 45);
+  ctx.fillText(botName, WIDTH - 30, HEIGHT - 36);
 
   return canvas.toBuffer();
 }
