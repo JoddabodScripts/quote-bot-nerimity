@@ -49,6 +49,10 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 See also: [Issue Templates](.github/ISSUE_TEMPLATE/)
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=JoddabodScripts/quote-bot-nerimity&type=Date)](https://www.star-history.com/#JoddabodScripts/quote-bot-nerimity&Date)
+
 ## License
 
 This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
