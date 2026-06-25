@@ -81,9 +81,30 @@ async function resolveUserMentions(content, mentions = []) {
 let botId = null;
 let isProcessing = false;
 
+// Cycle between rich presences every 10s.
+// 1. "Quoting in {n} servers!"  2. "Invite me to your servers!"
+let activityIndex = 0;
+function updatePresence() {
+  try {
+    const serverCount = client.servers?.cache?.size ?? 0;
+    const activities = [
+      { action: "Quoting", name: `in ${serverCount} servers!`, startedAt: Date.now() },
+      { action: "Kindly requesting you to:", name: "invite me to your servers", startedAt: Date.now() },
+    ];
+    const activity = activities[activityIndex % activities.length];
+    activityIndex += 1;
+    client.user?.setActivity(activity);
+  } catch (e) {
+    console.error("Failed to update presence:", e.message);
+  }
+}
+
 client.on(Events.Ready, () => {
   botId = client.user?.id;
   console.log(`Connected as ${client.user?.username}! (ID: ${botId})`);
+
+  updatePresence();
+  setInterval(updatePresence, 10000);
 });
 
 client.on(Events.MessageCreate, async (msg) => {
