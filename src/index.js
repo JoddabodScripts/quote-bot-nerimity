@@ -8,7 +8,6 @@ dotenv.config();
 
 const client = new Client();
 const TOKEN = process.env.TOKEN;
-const userToken = process.env.USER_TOKEN;
 
 async function uploadToCatbox(buffer) {
   const formData = new FormData();
@@ -23,19 +22,6 @@ async function uploadToCatbox(buffer) {
   const url = await res.text();
   if (!url.startsWith("https://")) throw new Error(url);
   return url.trim();
-}
-
-async function getUsername(userId) {
-  if (!userToken) return null;
-  try {
-    const res = await fetch(`https://nerimity.com/api/users/${userId}`, {
-      headers: { Authorization: userToken }
-    });
-    const data = await res.json();
-    return data.user?.username || null;
-  } catch (e) {
-    return null;
-  }
 }
 
 function getMentionUsername(user) {
@@ -55,7 +41,10 @@ async function resolveUserMentions(content, mentions = []) {
     if (id && username) mentionMap.set(String(id), username);
   }
 
-  const mentionIds = [...new Set([...content.matchAll(/\[@:([^\]]+)\]/g)].map((match) => match[1]))];
+  const mentionIds = [...new Set(
+    [...content.matchAll(/\[@:([^\]]+)\]/g)].map((m) => m[1]),
+  )];
+
   for (const userId of mentionIds) {
     if (!mentionMap.has(userId)) {
       const cachedUser = client.users?.cache?.get(userId);
@@ -65,11 +54,6 @@ async function resolveUserMentions(content, mentions = []) {
     if (!mentionMap.has(userId) && userId === client.user?.id) {
       mentionMap.set(userId, client.user.username);
     }
-
-    if (!mentionMap.has(userId)) {
-      const username = await getUsername(userId);
-      if (username) mentionMap.set(userId, username);
-    }
   }
 
   return content.replace(/\[@:([^\]]+)\]/g, (match, userId) => {
@@ -78,12 +62,68 @@ async function resolveUserMentions(content, mentions = []) {
   });
 }
 
-let botId = null;
-let isProcessing = false;
+async function resolveQuoteFromId(channelId, messageId) {
+  try {
+    const res = await fetch(
+      `https://nerimity.com/api/channels/${channelId}/messages/${messageId}`,
+      { headers: { Authorization: TOKEN } },
+    );
+    const data = await res.json();
+    if (!data.content) return null;
 
-// Cycle between rich presences every 10s.
-// 1. "Quoting in {n} servers!"  2. "Invite me to your servers!"
+    return {
+      content: data.content,
+      username: data.createdBy?.username || "User",
+      avatar: data.createdBy?.avatar,
+      userTag: data.createdBy?.tag,
+      mentions: data.mentions || [],
+    };
+  } catch (e) {
+    console.log("Failed to fetch quoted message:", e.message);
+    return null;
+  }
+}
+
+function resolveQuoteFromReply(rawMsg) {
+  const reply = rawMsg?.replyMessages?.[0]?.replyToMessage;
+  if (!reply?.content) return null;
+
+  return {
+    content: reply.content,
+    username: reply.createdBy?.username || "User",
+    avatar: reply.createdBy?.avatar,
+    userTag: reply.createdBy?.tag,
+    mentions: reply.mentions || [],
+  };
+}
+
+async function resolveQuoteFromFallback(message, excludeUserId) {
+  try {
+    const msgs = await message.channel?.messages?.fetch({ limit: 20 });
+    if (!msgs) return null;
+
+    const msgList = [...msgs.values()].reverse();
+    for (const m of msgList) {
+      if (m.user?.bot || !m.content) continue;
+      if (m.id === message.id || m.user?.id === excludeUserId) continue;
+
+      return {
+        content: m.content,
+        username: m.user?.username || "User",
+        avatar: m.raw?.createdBy?.avatar,
+        userTag: m.user?.tag || m.raw?.createdBy?.tag,
+        mentions: m.mentions || m.raw?.mentions || [],
+      };
+    }
+  } catch {
+    // Channel fetch failed — silently fall through
+  }
+  return null;
+}
+
+const PRESENCE_INTERVAL_MS = 10_000;
 let activityIndex = 0;
+
 function updatePresence() {
   try {
     const serverCount = client.servers?.cache?.size ?? 0;
@@ -99,113 +139,52 @@ function updatePresence() {
   }
 }
 
-client.on(Events.Ready, () => {
-  botId = client.user?.id;
-  console.log(`Connected as ${client.user?.username}! (ID: ${botId})`);
+let ready = false;
 
+client.on(Events.Ready, () => {
+  ready = true;
+  console.log(`Connected as ${client.user?.username}! (ID: ${client.user?.id})`);
   updatePresence();
-  setInterval(updatePresence, 10000);
+  setInterval(updatePresence, PRESENCE_INTERVAL_MS);
 });
 
+let isProcessing = false;
+
 client.on(Events.MessageCreate, async (msg) => {
+  if (!ready || !msg.user || msg.user.id === client.user?.id) return;
+  if (isProcessing) return;
+
+  const content = msg.content || "";
+  const botId = client.user?.id;
+  const quoteMatch = content.match(/\[q:(\d+)\]/);
+  const isPing = content.match(/\[@:(\d+)\]/)?.[1] === botId;
+  if (!quoteMatch && !isPing) return;
+
+  isProcessing = true;
   try {
-    const message = msg;
-    if (!botId || !message.user || message.user.id === botId) return;
-    if (isProcessing) return;
-    isProcessing = true;
+    const quote =
+      (quoteMatch && await resolveQuoteFromId(msg.channel?.id, quoteMatch[1])) ||
+      resolveQuoteFromReply(msg.raw) ||
+      (await resolveQuoteFromFallback(msg, msg.user?.id));
 
-    const content = message.content || "";
-    // Check for either quote [q:msgId] or ping [@:botId]
-    const quoteMatch = content.match(/\[q:(\d+)\]/);
-    const pingMatch = content.match(/\[@:(\d+)\]/);
-    const isQuote = quoteMatch || (pingMatch && pingMatch[1] === botId);
-    if (!isQuote) {
-      isProcessing = false;
-      return;
-    }
+    if (!quote?.content) return;
 
-    let targetContent = null;
-    let targetUsername = null;
-    let targetAvatar = null;
-    let targetUserId = null;
-    let targetUserTag = null;
-    let targetMentions = [];
+    quote.content = await resolveUserMentions(quote.content, quote.mentions);
 
-    // Check for built-in quote format [q:messageId]
-    if (quoteMatch) {
-      const quotedMsgId = quoteMatch[1];
-      try {
-        const msgRes = await fetch(`https://nerimity.com/api/channels/${message.channel?.id}/messages/${quotedMsgId}`, {
-          headers: { Authorization: process.env.TOKEN }
-        });
-        const msgData = await msgRes.json();
-        if (msgData.content) {
-          targetContent = msgData.content;
-          targetUsername = msgData.createdBy?.username || "User";
-          targetAvatar = msgData.createdBy?.avatar;
-          targetUserId = msgData.createdBy?.id;
-          targetUserTag = msgData.createdBy?.tag;
-          targetMentions = msgData.mentions || [];
-        }
-      } catch (e) {
-        console.log("Failed to fetch quoted message:", e.message);
-      }
-    }
-
-    const rawMsg = message.raw;
-    if (rawMsg?.replyMessages?.length > 0) {
-      const replyData = rawMsg.replyMessages[0];
-      if (replyData?.replyToMessage) {
-        targetContent = replyData.replyToMessage.content;
-        targetUsername = replyData.replyToMessage.createdBy?.username || "User";
-        targetAvatar = replyData.replyToMessage.createdBy?.avatar;
-        targetUserId = replyData.replyToMessage.createdBy?.id;
-        targetUserTag = replyData.replyToMessage.createdBy?.tag;
-        targetMentions = replyData.replyToMessage.mentions || [];
-      }
-    }
-
-    if (!targetContent) {
-      const pingerId = message.user?.id;
-      const msgs = await message.channel?.messages?.fetch({ limit: 20 });
-      const msgList = [...(msgs?.values() || [])].reverse();
-      for (const m of msgList) {
-        if (!m.user?.bot && m.content && m.id !== message.id && m.user?.id !== pingerId) {
-          targetContent = m.content;
-          targetUsername = m.user?.username || "User";
-          targetAvatar = m.raw?.createdBy?.avatar;
-          targetUserId = m.user?.id;
-          targetUserTag = m.user?.tag || m.raw?.createdBy?.tag;
-          targetMentions = m.mentions || m.raw?.mentions || [];
-          break;
-        }
-      }
-    }
-
-    if (!targetContent || !targetUsername) {
-      isProcessing = false;
-      return;
-    }
-
-    // Replace Nerimity mentions [@:userId] with the mentioned user's name.
-    targetContent = await resolveUserMentions(targetContent, targetMentions);
-
-    let avatarUrl = null;
-    if (targetAvatar) {
-      avatarUrl = `https://cdn.nerimity.com/${targetAvatar}`;
-    }
+    const avatarUrl = quote.avatar
+      ? `https://cdn.nerimity.com/${quote.avatar}`
+      : null;
 
     const imageBuffer = await generateQuoteImage(
-      targetContent.slice(0, 500),
-      targetUsername,
+      quote.content.slice(0, 500),
+      quote.username,
       client.user?.username || "Quote Bot",
       avatarUrl,
-      targetUserTag
+      quote.userTag,
     );
 
     const url = await uploadToCatbox(imageBuffer);
-    await message.reply(url);
-    
+    await msg.reply(url);
   } catch (e) {
     console.error("Error:", e.message, e.stack);
   } finally {
@@ -213,4 +192,4 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 });
 
-client.login(process.env.TOKEN);
+client.login(TOKEN);
